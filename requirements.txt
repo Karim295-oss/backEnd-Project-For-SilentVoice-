@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+
+numpy<2
+opencv-contrib-python
+mediapipe==0.10.30
+tensorflow<2.20
+scikit-learn
+spacy
+nltk
+
+SpeechRecognition
+PyAudio
+
+websockets>=13

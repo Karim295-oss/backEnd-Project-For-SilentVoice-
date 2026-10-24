@@ -1,0 +1,3 @@
+# Rule-based English-to-gloss translation, not an LLM
+
+Meeting turns are translated into ASL glosses by the rule-based spaCy translator (`models/grammar_translator.py`), improved with clause splitting, filler removal, and a manual-table → WordNet → fingerspelling fallback restricted to the sign library vocabulary. We chose this over an LLM (cloud or local), even though an LLM would paraphrase better, because it works offline, needs no API key or per-call cost, adds no network latency, and gives predictable output. The same translator also serves the web app's Speech → Sign path, so the two never drift apart.

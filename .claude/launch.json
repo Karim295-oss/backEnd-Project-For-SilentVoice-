@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "backend",
+      "runtimeExecutable": "venv/Scripts/python.exe",
+      "runtimeArgs": ["backend.py"],
+      "port": 8000
+    },
+    {
+      "name": "frontend",
+      "runtimeExecutable": "C:\\PROGRA~1\\nodejs\\npm.cmd",
+      "runtimeArgs": ["run", "start", "--prefix", "React Project/react-project"],
+      "port": 3000
+    }
+  ]
+}
