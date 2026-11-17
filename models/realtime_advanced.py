@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import mediapipe_patch  # noqa: E402,F401  makes mediapipe.solutions work on every version
 import os
 import cv2
 import numpy as np

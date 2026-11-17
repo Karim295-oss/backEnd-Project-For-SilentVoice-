@@ -9,7 +9,7 @@ sys.path.insert(0, ROOT)
 
 from sign_resolver import cached_resolver  # noqa: E402
 
-HEAVY_MODULES = ["cv2", "mediapipe", "mediapipe.python", "mediapipe.python.solutions",
+HEAVY_MODULES = ["mediapipe_patch", "cv2", "mediapipe", "mediapipe.solutions",
                  "mediapipe.solutions.holistic", "tensorflow", "tensorflow.keras",
                  "tensorflow.keras.models", "tgcn_asl100"]
 

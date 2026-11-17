@@ -46,6 +46,10 @@ fall back to `models/MP_Data_Norm/`.
 
 **Test without Godot:** `python fake_godot_client.py ws://localhost:8765` prints every message.
 
+**Test without Google Meet:** `python demo_server.py` runs the same server (real translation, sign
+library, pacing and LAN discovery) with a scripted conversation and prints every ack it receives.
+Open Deaf Mode in the Godot app and it finds the PC by itself.
+
 **Windows Firewall:** allow inbound TCP 8765 from an elevated PowerShell:
 
 ```powershell

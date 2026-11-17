@@ -1,288 +1,274 @@
 """
 mediapipe_patch.py
 ==================
-Compatibility shim for mediapipe >= 0.10.30 which removed the `solutions` API.
-This module reconstructs mediapipe.solutions.holistic, drawing_utils, hands, and pose
-using the new mediapipe.tasks API, then injects them into sys.modules so that
-all existing `import mediapipe.solutions.*` statements continue to work.
+Makes `import mediapipe.solutions.<name>` work on every MediaPipe version.
 
-Usage: import this module ONCE, BEFORE any mediapipe.solutions imports.
-       In backend.py: add `import mediapipe_patch` as the very first import.
+- MediaPipe <= 0.10.21 ships the real solutions API under `mediapipe.python.solutions`.
+  We only alias it as `mediapipe.solutions`, so the real Holistic model (the one the
+  sign model was trained with) is used unchanged.
+- MediaPipe >= 0.10.30 removed the solutions API. Only then do we build a stand-in
+  Holistic from the Tasks API (PoseLandmarker + HandLandmarker). It has no face
+  landmarks (this project never uses them) and its landmarks are close to, but not
+  identical to, the old Holistic ones, so recognition accuracy may drop a little.
+
+Usage: `import mediapipe_patch` before any `import mediapipe.solutions.*`.
+`USING_COMPAT_SHIM` tells you which path was taken.
 """
-import sys
+import importlib
 import os
+import sys
 import types
-import urllib.request
 
 import mediapipe as mp
-import mediapipe.tasks as mp_tasks
 
-# ── Model download ─────────────────────────────────────────────────────────────
-_MODELS_DIR = os.path.join(os.path.expanduser("~"), ".mediapipe_compat_models")
-
-_POSE_URL = (
-    "https://storage.googleapis.com/mediapipe-models/"
-    "pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
-)
-_HAND_URL = (
-    "https://storage.googleapis.com/mediapipe-models/"
-    "hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
-)
+_SUBMODULES = ("holistic", "drawing_utils", "drawing_styles", "hands", "pose")
 
 
-def _get_model(url: str, filename: str) -> str:
-    os.makedirs(_MODELS_DIR, exist_ok=True)
-    path = os.path.join(_MODELS_DIR, filename)
-    if not os.path.exists(path):
-        print(f"[mediapipe_patch] Downloading {filename} …", flush=True)
-        urllib.request.urlretrieve(url, path)
-        print(f"[mediapipe_patch] {filename} ready.", flush=True)
-    return path
+def _alias_real_solutions() -> bool:
+    """Expose mediapipe.python.solutions as mediapipe.solutions. False if it doesn't exist."""
+    try:
+        real = importlib.import_module("mediapipe.python.solutions")
+        for name in _SUBMODULES:
+            importlib.import_module(f"mediapipe.python.solutions.{name}")
+    except ImportError:
+        return False
+    sys.modules["mediapipe.solutions"] = real
+    for name in _SUBMODULES:
+        sys.modules[f"mediapipe.solutions.{name}"] = sys.modules[f"mediapipe.python.solutions.{name}"]
+    mp.solutions = real
+    return True
 
 
-# ── Landmark shims (mimic old NormalizedLandmark / NormalizedLandmarkList) ────
-class _Lm:
-    __slots__ = ("x", "y", "z", "visibility")
+def _install_shim() -> None:
+    import urllib.request
 
-    def __init__(self, src):
-        self.x = src.x
-        self.y = src.y
-        self.z = src.z
-        self.visibility = getattr(src, "visibility", 0.0)
+    import mediapipe.tasks as mp_tasks
 
+    models_dir = os.path.join(os.path.expanduser("~"), ".mediapipe_compat_models")
+    pose_url = ("https://storage.googleapis.com/mediapipe-models/"
+                "pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task")
+    hand_url = ("https://storage.googleapis.com/mediapipe-models/"
+                "hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task")
 
-class _LmList:
-    __slots__ = ("landmark",)
+    def get_model(url: str, filename: str) -> str:
+        os.makedirs(models_dir, exist_ok=True)
+        path = os.path.join(models_dir, filename)
+        if not os.path.exists(path):
+            print(f"[mediapipe_patch] Downloading {filename} ...", flush=True)
+            tmp = path + ".part"  # a failed download must not leave a broken model behind
+            urllib.request.urlretrieve(url, tmp)
+            os.replace(tmp, path)
+        return path
 
-    def __init__(self, src_list):
-        self.landmark = [_Lm(lm) for lm in src_list]
+    class Lm:
+        __slots__ = ("x", "y", "z", "visibility")
 
+        def __init__(self, src):
+            self.x, self.y, self.z = src.x, src.y, src.z
+            # Tasks landmarks may carry visibility=None; old Holistic always had a float.
+            self.visibility = getattr(src, "visibility", None) or 0.0
 
-class _HolisticResult:
-    __slots__ = (
-        "pose_landmarks",
-        "left_hand_landmarks",
-        "right_hand_landmarks",
-        "face_landmarks",
-    )
+    class LmList:
+        __slots__ = ("landmark",)
 
-    def __init__(self):
-        self.pose_landmarks = None
-        self.left_hand_landmarks = None
-        self.right_hand_landmarks = None
-        self.face_landmarks = None  # not supported (not used by this project)
+        def __init__(self, src_list):
+            self.landmark = [Lm(lm) for lm in src_list]
 
+    class Classification:
+        def __init__(self, label, score):
+            self.label, self.score = label, score
 
-# ── Holistic ───────────────────────────────────────────────────────────────────
-class Holistic:
-    """Drop-in replacement for mediapipe.solutions.holistic.Holistic."""
+    class ClassificationList:
+        def __init__(self, label, score):
+            self.classification = [Classification(label, score)]
 
-    def __init__(
-        self,
-        static_image_mode: bool = False,
-        min_detection_confidence: float = 0.5,
-        min_tracking_confidence: float = 0.5,
-        **_ignored,
-    ):
-        self._static = static_image_mode
-        self._ts_ms = 0
+    class HolisticResult:
+        def __init__(self):
+            self.pose_landmarks = None
+            self.left_hand_landmarks = None
+            self.right_hand_landmarks = None
+            self.face_landmarks = None  # not supported (not used by this project)
+            self.hand_labels = []        # (Tasks label, score, LmList) for the Hands stand-in
 
-        mode = (
-            mp_tasks.vision.RunningMode.IMAGE
-            if static_image_mode
-            else mp_tasks.vision.RunningMode.VIDEO
-        )
+    class Holistic:
+        """Stand-in for mediapipe.solutions.holistic.Holistic."""
 
-        pose_path = _get_model(_POSE_URL, "pose_landmarker_full.task")
-        hand_path = _get_model(_HAND_URL, "hand_landmarker.task")
-
-        self._pose = mp_tasks.vision.PoseLandmarker.create_from_options(
-            mp_tasks.vision.PoseLandmarkerOptions(
-                base_options=mp_tasks.BaseOptions(model_asset_path=pose_path),
+        def __init__(self, static_image_mode=False, min_detection_confidence=0.5,
+                     min_tracking_confidence=0.5, **_ignored):
+            self._static = static_image_mode
+            self._ts_ms = 0
+            vision = mp_tasks.vision
+            mode = vision.RunningMode.IMAGE if static_image_mode else vision.RunningMode.VIDEO
+            self._pose = vision.PoseLandmarker.create_from_options(vision.PoseLandmarkerOptions(
+                base_options=mp_tasks.BaseOptions(
+                    model_asset_path=get_model(pose_url, "pose_landmarker_full.task")),
                 running_mode=mode,
                 min_pose_detection_confidence=min_detection_confidence,
                 min_pose_presence_confidence=min_detection_confidence,
-                min_tracking_confidence=min_tracking_confidence,
-            )
-        )
-        self._hands = mp_tasks.vision.HandLandmarker.create_from_options(
-            mp_tasks.vision.HandLandmarkerOptions(
-                base_options=mp_tasks.BaseOptions(model_asset_path=hand_path),
+                min_tracking_confidence=min_tracking_confidence))
+            self._hands = vision.HandLandmarker.create_from_options(vision.HandLandmarkerOptions(
+                base_options=mp_tasks.BaseOptions(
+                    model_asset_path=get_model(hand_url, "hand_landmarker.task")),
                 running_mode=mode,
                 num_hands=2,
                 min_hand_detection_confidence=min_detection_confidence,
                 min_hand_presence_confidence=min_detection_confidence,
-                min_tracking_confidence=min_tracking_confidence,
-            )
-        )
+                min_tracking_confidence=min_tracking_confidence))
 
-    def process(self, rgb_image):
-        """Process an RGB numpy image. Returns an object with pose/hand landmarks."""
-        self._ts_ms += 33  # ~30 fps increment
-
-        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
-
-        if self._static:
-            pose_res = self._pose.detect(mp_img)
-            hand_res = self._hands.detect(mp_img)
-        else:
-            pose_res = self._pose.detect_for_video(mp_img, self._ts_ms)
-            hand_res = self._hands.detect_for_video(mp_img, self._ts_ms)
-
-        out = _HolisticResult()
-
-        # Pose (33 landmarks)
-        if pose_res.pose_landmarks:
-            out.pose_landmarks = _LmList(pose_res.pose_landmarks[0])
-
-        # Hands – Tasks API labels from the *camera* perspective.
-        # "Left" in camera view = signer's right hand, and vice-versa.
-        for i, handedness_list in enumerate(hand_res.handedness):
-            label = handedness_list[0].category_name  # "Left" or "Right"
-            lm_list = _LmList(hand_res.hand_landmarks[i])
-            if label == "Left":
-                out.right_hand_landmarks = lm_list
+        def process(self, rgb_image):
+            self._ts_ms += 33  # VIDEO mode needs increasing timestamps; ~30 fps
+            img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
+            if self._static:
+                pose_res, hand_res = self._pose.detect(img), self._hands.detect(img)
             else:
-                out.left_hand_landmarks = lm_list
+                pose_res = self._pose.detect_for_video(img, self._ts_ms)
+                hand_res = self._hands.detect_for_video(img, self._ts_ms)
 
-        return out
+            out = HolisticResult()
+            if pose_res.pose_landmarks:
+                out.pose_landmarks = LmList(pose_res.pose_landmarks[0])
+            for i, handedness in enumerate(hand_res.handedness):
+                label, score = handedness[0].category_name, handedness[0].score
+                out.hand_labels.append((label, score, LmList(hand_res.hand_landmarks[i])))
+            self._assign_hands(out)
+            return out
 
-    def __enter__(self):
-        return self
+        @staticmethod
+        def _assign_hands(out):
+            """Give each detected hand to the signer's left or right side.
 
-    def __exit__(self, *_):
-        self.close()
+            The pose wrists (landmarks 15 = left, 16 = right) decide: each hand goes to the
+            side whose pose wrist is nearest its own wrist, which matches what Holistic does.
+            Without a pose, fall back to the Tasks label (checked against Holistic on WLASL
+            clips: "Right" is the signer's right hand on the raw, un-mirrored frame)."""
+            hands = [lm for _, _, lm in out.hand_labels]
+            if not hands:
+                return
+            if out.pose_landmarks is None:
+                for label, _, lm in out.hand_labels:
+                    if label == "Right":
+                        out.right_hand_landmarks = lm
+                    else:
+                        out.left_hand_landmarks = lm
+                return
+            pose = out.pose_landmarks.landmark
 
-    def close(self):
-        for attr in ("_pose", "_hands"):
-            try:
-                getattr(self, attr).close()
-            except Exception:
-                pass
+            def dist(hand, idx):
+                w, p = hand.landmark[0], pose[idx]
+                return (w.x - p.x) ** 2 + (w.y - p.y) ** 2
 
+            if len(hands) == 1:
+                h = hands[0]
+                if dist(h, 15) <= dist(h, 16):
+                    out.left_hand_landmarks = h
+                else:
+                    out.right_hand_landmarks = h
+                return
+            a, b = hands[0], hands[1]
+            if dist(a, 15) + dist(b, 16) <= dist(a, 16) + dist(b, 15):
+                out.left_hand_landmarks, out.right_hand_landmarks = a, b
+            else:
+                out.left_hand_landmarks, out.right_hand_landmarks = b, a
 
-# ── Drawing utils stubs ────────────────────────────────────────────────────────
-class DrawingSpec:
-    def __init__(self, color=(0, 255, 0), thickness=1, circle_radius=2):
-        self.color = color
-        self.thickness = thickness
-        self.circle_radius = circle_radius
+        def __enter__(self):
+            return self
 
+        def __exit__(self, *_):
+            self.close()
 
-def draw_landmarks(
-    image,
-    landmark_list,
-    connections=None,
-    landmark_drawing_spec=None,
-    connection_drawing_spec=None,
-):
-    """Minimal OpenCV-based landmark drawing (replaces mp_drawing.draw_landmarks)."""
-    if landmark_list is None:
-        return
-    try:
+        def close(self):
+            for landmarker in (self._pose, self._hands):
+                try:
+                    landmarker.close()
+                except Exception:
+                    pass
+
+    class Hands:
+        """Stand-in for mediapipe.solutions.hands.Hands (same labels as the old API)."""
+
+        def __init__(self, *args, max_num_hands=2, **kwargs):
+            self._inner = Holistic(*args, **kwargs)
+
+        def process(self, rgb_image):
+            r = self._inner.process(rgb_image)
+            res = types.SimpleNamespace(multi_hand_landmarks=None, multi_handedness=None)
+            if r.hand_labels:
+                res.multi_hand_landmarks = [lm for _, _, lm in r.hand_labels]
+                res.multi_handedness = [ClassificationList(label, score)
+                                        for label, score, _ in r.hand_labels]
+            return res
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            self._inner.close()
+
+        def close(self):
+            self._inner.close()
+
+    class DrawingSpec:
+        def __init__(self, color=(0, 255, 0), thickness=1, circle_radius=2):
+            self.color, self.thickness, self.circle_radius = color, thickness, circle_radius
+
+    def draw_landmarks(image, landmark_list, connections=None,
+                       landmark_drawing_spec=None, connection_drawing_spec=None):
+        """Small OpenCV version of mp_drawing.draw_landmarks (points and connections)."""
+        if landmark_list is None:
+            return
         import cv2
 
         h, w = image.shape[:2]
-        spec = landmark_drawing_spec
-        color = spec.color if (spec and hasattr(spec, "color")) else (0, 255, 0)
-        radius = spec.circle_radius if (spec and hasattr(spec, "circle_radius")) else 2
-        for lm in landmark_list.landmark:
-            cx, cy = int(lm.x * w), int(lm.y * h)
-            cv2.circle(image, (cx, cy), radius, color, -1)
-    except Exception:
-        pass
+        pts = [(int(lm.x * w), int(lm.y * h)) for lm in landmark_list.landmark]
+        line = connection_drawing_spec or DrawingSpec(color=(255, 255, 255))
+        for a, b in connections or ():
+            if a < len(pts) and b < len(pts):
+                cv2.line(image, pts[a], pts[b], line.color, line.thickness)
+        dot = landmark_drawing_spec or DrawingSpec()
+        for p in pts:
+            cv2.circle(image, p, dot.circle_radius, dot.color, -1)
+
+    # Same index pairs as the old solutions API.
+    hand_connections = frozenset([
+        (0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8),
+        (5, 9), (9, 10), (10, 11), (11, 12), (9, 13), (13, 14), (14, 15), (15, 16),
+        (13, 17), (0, 17), (17, 18), (18, 19), (19, 20)])
+    pose_connections = frozenset([
+        (0, 1), (1, 2), (2, 3), (3, 7), (0, 4), (4, 5), (5, 6), (6, 8), (9, 10),
+        (11, 12), (11, 13), (13, 15), (15, 17), (15, 19), (15, 21), (17, 19),
+        (12, 14), (14, 16), (16, 18), (16, 20), (16, 22), (18, 20), (11, 23),
+        (12, 24), (23, 24), (23, 25), (24, 26), (25, 27), (26, 28), (27, 29),
+        (28, 30), (29, 31), (30, 32), (27, 31), (28, 32)])
+    empty = frozenset()
+
+    def make_module(name, **attrs):
+        m = types.ModuleType(name)
+        m.__dict__.update(attrs)
+        sys.modules[name] = m
+        return m
+
+    sol = make_module("mediapipe.solutions")
+    mp.solutions = sol
+    sol.holistic = make_module("mediapipe.solutions.holistic", Holistic=Holistic,
+                               POSE_CONNECTIONS=pose_connections,
+                               HAND_CONNECTIONS=hand_connections,
+                               FACEMESH_TESSELATION=empty, FACEMESH_CONTOURS=empty)
+    sol.drawing_utils = make_module("mediapipe.solutions.drawing_utils",
+                                    draw_landmarks=draw_landmarks, DrawingSpec=DrawingSpec)
+    sol.drawing_styles = make_module(
+        "mediapipe.solutions.drawing_styles",
+        get_default_pose_landmarks_style=DrawingSpec,
+        get_default_hand_landmarks_style=DrawingSpec,
+        get_default_hand_connections_style=DrawingSpec,
+        get_default_face_mesh_tesselation_style=DrawingSpec)
+    sol.hands = make_module("mediapipe.solutions.hands", Hands=Hands,
+                            HAND_CONNECTIONS=hand_connections)
+    sol.pose = make_module("mediapipe.solutions.pose", Pose=Holistic,
+                           POSE_CONNECTIONS=pose_connections)
+    print("[mediapipe_patch] MediaPipe has no solutions API; using the Tasks API stand-in "
+          "(no face landmarks, accuracy may differ slightly).", flush=True)
 
 
-POSE_CONNECTIONS: frozenset = frozenset()
-HAND_CONNECTIONS: frozenset = frozenset()
-FACEMESH_TESSELATION: frozenset = frozenset()
-FACEMESH_CONTOURS: frozenset = frozenset()
-
-
-# ── Hands stub ────────────────────────────────────────────────────────────────
-class Hands:
-    """Stub for mediapipe.solutions.hands.Hands (wraps Holistic)."""
-
-    def __init__(self, *args, **kwargs):
-        self._inner = Holistic(*args, **kwargs)
-
-    def process(self, rgb_image):
-        r = self._inner.process(rgb_image)
-
-        class _HandResult:
-            pass
-
-        res = _HandResult()
-        res.multi_hand_landmarks = []
-        if r.left_hand_landmarks:
-            res.multi_hand_landmarks.append(r.left_hand_landmarks)
-        if r.right_hand_landmarks:
-            res.multi_hand_landmarks.append(r.right_hand_landmarks)
-        return res
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        self._inner.close()
-
-
-# ── Inject into sys.modules ────────────────────────────────────────────────────
-def _make_module(name: str, **attrs):
-    m = types.ModuleType(name)
-    for k, v in attrs.items():
-        setattr(m, k, v)
-    sys.modules[name] = m
-    return m
-
-
-# mediapipe.solutions
-_sol = _make_module("mediapipe.solutions")
-setattr(mp, "solutions", _sol)
-
-# mediapipe.solutions.holistic
-_hol = _make_module(
-    "mediapipe.solutions.holistic",
-    Holistic=Holistic,
-    POSE_CONNECTIONS=POSE_CONNECTIONS,
-)
-setattr(_sol, "holistic", _hol)
-
-# mediapipe.solutions.drawing_utils
-_draw = _make_module(
-    "mediapipe.solutions.drawing_utils",
-    draw_landmarks=draw_landmarks,
-    DrawingSpec=DrawingSpec,
-    POSE_CONNECTIONS=POSE_CONNECTIONS,
-    HAND_CONNECTIONS=HAND_CONNECTIONS,
-    FACEMESH_TESSELATION=FACEMESH_TESSELATION,
-    FACEMESH_CONTOURS=FACEMESH_CONTOURS,
-)
-setattr(_sol, "drawing_utils", _draw)
-
-# mediapipe.solutions.drawing_styles (stub - used in some scripts)
-_draw_styles = _make_module(
-    "mediapipe.solutions.drawing_styles",
-    get_default_pose_landmarks_style=lambda: DrawingSpec(),
-    get_default_hand_landmarks_style=lambda: DrawingSpec(),
-    get_default_face_mesh_tesselation_style=lambda: DrawingSpec(),
-)
-setattr(_sol, "drawing_styles", _draw_styles)
-
-# mediapipe.solutions.hands
-_hands_mod = _make_module(
-    "mediapipe.solutions.hands",
-    Hands=Hands,
-    HAND_CONNECTIONS=HAND_CONNECTIONS,
-)
-setattr(_sol, "hands", _hands_mod)
-
-# mediapipe.solutions.pose
-_pose_mod = _make_module(
-    "mediapipe.solutions.pose",
-    Pose=Holistic,
-    POSE_CONNECTIONS=POSE_CONNECTIONS,
-)
-setattr(_sol, "pose", _pose_mod)
-
-print("[mediapipe_patch] mediapipe.solutions compatibility layer installed.", flush=True)
+USING_COMPAT_SHIM = not _alias_real_solutions()
+if USING_COMPAT_SHIM:
+    _install_shim()

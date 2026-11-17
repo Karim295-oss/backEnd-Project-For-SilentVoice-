@@ -6,6 +6,9 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import mediapipe_patch  # noqa: E402,F401  makes mediapipe.solutions work on every version
+
 import cv2
 import mediapipe.solutions.holistic as mp_holistic
 import numpy as np

@@ -3,7 +3,10 @@ uvicorn[standard]
 
 numpy<2
 opencv-contrib-python
-mediapipe==0.10.30
+# 0.10.21 has the real Holistic the sign model was trained with (Python 3.9-3.12).
+# Newer Pythons need mediapipe 1.x (0.10.30 crashes on Windows); mediapipe_patch.py fills in the removed API.
+mediapipe==0.10.21; python_version < "3.13"
+mediapipe>=1.1; python_version >= "3.13"
 tensorflow<2.20
 scikit-learn
 spacy
